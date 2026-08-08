@@ -14,6 +14,15 @@ edition = "2021"
 name = "tauri_app_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+# The debug APK ships unstripped Rust libraries and lands north of 100 MB.
+# Release builds for distribution want the opposite of debuggability.
+[profile.release]
+opt-level = "z"     # optimise for size, not speed — this app does almost nothing hot
+lto = true          # drop everything unreachable across crates
+codegen-units = 1   # better size at the cost of a slower build
+panic = "abort"     # no unwinding tables
+strip = true        # symbols are the bulk of the weight
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

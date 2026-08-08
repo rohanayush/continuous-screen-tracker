@@ -41,8 +41,25 @@ import android.widget.TextView
 class ScreenTimerService : Service() {
 
     companion object {
-        // ▶ TESTING: 20 seconds. For production change to 20 * 60 * 1000L (20 minutes).
-        const val THRESHOLD_MS = 20_000L
+        // How long the screen may stay on before the reminder appears. Chosen in
+        // the app and stored in prefs; 20 minutes is the usual eye-rest advice.
+        const val DEFAULT_THRESHOLD_MS = 20 * 60 * 1000L
+
+        /** The intervals the app offers, in milliseconds. */
+        val INTERVAL_CHOICES = longArrayOf(
+            20_000L,          // 20s — for trying it out
+            5 * 60_000L,
+            10 * 60_000L,
+            20 * 60_000L,
+            30 * 60_000L,
+            60 * 60_000L
+        )
+
+        const val PREFS = "eye_rest_prefs"
+        const val KEY_INTERVAL = "interval_ms"
+
+        /** Tell a running service the interval changed, so it re-arms now. */
+        const val ACTION_INTERVAL_CHANGED = "com.eyerest.app.INTERVAL_CHANGED"
 
         // Pet-name dismissal: entered name must match the saved one with at least
         // this LCS-based similarity (so "gldi" still matches "goldie").
@@ -50,7 +67,6 @@ class ScreenTimerService : Service() {
 
         private const val CHANNEL_ID = "eye_rest_channel"
         private const val NOTIF_ID = 1001
-        private const val PREFS = "eye_rest_prefs"
         private const val KEY_PET = "pet_name"
     }
 
@@ -70,6 +86,10 @@ class ScreenTimerService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // A changed interval should take effect now, not after the next unlock.
+        if (intent?.action == ACTION_INTERVAL_CHANGED) {
+            resetCounting()
+        }
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
         if (pm.isInteractive) {
             startCounting()
@@ -101,8 +121,14 @@ class ScreenTimerService : Service() {
     private fun startCounting() {
         removeOverlay()
         handler.removeCallbacks(showReminder)
-        handler.postDelayed(showReminder, THRESHOLD_MS)
+        // Read every time, so a change made in the app applies on the next cycle
+        // even if the service was never restarted.
+        handler.postDelayed(showReminder, thresholdMs())
     }
+
+    /** The chosen rest interval, falling back to the default if never set. */
+    private fun thresholdMs(): Long =
+        prefs().getLong(KEY_INTERVAL, DEFAULT_THRESHOLD_MS)
 
     /** Screen turned off / locked: cancel everything and reset to 0. */
     private fun resetCounting() {

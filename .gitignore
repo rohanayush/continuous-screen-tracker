@@ -45,3 +45,7 @@ src-tauri/gen/android/app/src/main/java/com/eyerest/app/generated/
 # ---- Build outputs ----
 *.apk
 *.aab
+
+# holds the signing password
+keystore.properties
+*.idsig
