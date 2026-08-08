@@ -139,8 +139,10 @@ watch(note, (v) => localStorage.setItem("eyeRestNote", v));
 
     <aside class="hint">
       <strong>One-time setup</strong>
-      Allow <em>“Display over other apps”</em> when prompted — without it the
-      reminder cannot appear over whatever you are using.
+      Installed from an APK, so Android locks the permission this needs. Open
+      <em>Settings → Apps → Eye Rest Reminder</em>, tap the <em>⋮</em> in the
+      top-right and choose <em>“Allow restricted settings”</em> — the only item
+      there. Then switch on <em>Display over other apps</em>.
     </aside>
 
     <p class="footer">Rest early, rest often. Your eyes do the rest.</p>
