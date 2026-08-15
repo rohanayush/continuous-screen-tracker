@@ -18,6 +18,8 @@ type Bridge = {
   getSnoozeUntil?(): string;
   clearSnooze?(): void;
   quietReason?(): string;
+  getNote?(): string;
+  setNote?(text: string): void;
 };
 
 /** A stretch of the day the reminder stays out of, in minutes from midnight. */
@@ -46,13 +48,15 @@ function choose(ms: number) {
   else localStorage.setItem("eyeRestInterval", String(ms)); // preview builds
 }
 
-// One simple note, editable by default, persisted in the WebView's storage.
+// One simple note, editable by default. The service's copy is the one the
+// overlay draws, so it wins on load — reinstalling the WebView's storage must
+// not quietly blank a note that is still being shown on the black screen.
 const note = ref("");
 
 onMounted(() => {
-  note.value = localStorage.getItem("eyeRestNote") ?? "";
-
   const b = bridge();
+  note.value = b?.getNote?.() || localStorage.getItem("eyeRestNote") || "";
+
   if (b) {
     const parsed = b.getChoices().split(",").map(Number).filter((n) => n > 0);
     if (parsed.length) choices.value = parsed;
@@ -62,7 +66,12 @@ onMounted(() => {
   }
 });
 
-watch(note, (v) => localStorage.setItem("eyeRestNote", v));
+// Mirrored to the service as well as kept locally: the overlay shows this note
+// once the pet name is entered, and it draws it long after this WebView is gone.
+watch(note, (v) => {
+  localStorage.setItem("eyeRestNote", v);
+  bridge()?.setNote?.(v);
+});
 
 // ---- Quiet hours ---------------------------------------------------------
 //
@@ -305,6 +314,9 @@ onUnmounted(() => window.clearInterval(quietTimer));
     <!-- ===== Note ===== -->
     <section class="note-card">
       <label class="note-label" for="note">My note</label>
+      <p class="note-hint">
+        Shown on the reminder screen — but only after you type your pet name.
+      </p>
       <textarea
         id="note"
         v-model="note"
@@ -810,6 +822,11 @@ h1 {
   letter-spacing: 0.14em;
   color: var(--ink-dim);
   margin: 0 0 0.5rem 0.2rem;
+}
+.note-hint {
+  margin: -0.25rem 0 0.55rem 0.2rem;
+  font-size: 0.78rem;
+  color: var(--ink-dim);
 }
 .note {
   width: 100%;

@@ -70,6 +70,13 @@ class ScreenTimerService : Service() {
         private const val CHANNEL_ID = "eye_rest_channel"
         private const val NOTIF_ID = 1001
         private const val KEY_PET = "pet_name"
+
+        /**
+         * The note, mirrored here by the app. It is written in the WebView, whose
+         * localStorage the service cannot read — and the overlay outlives the
+         * Activity, so it needs its own copy.
+         */
+        const val KEY_NOTE = "user_note"
     }
 
     private val handler = Handler(Looper.getMainLooper())
@@ -149,6 +156,8 @@ class ScreenTimerService : Service() {
         prefs().edit().putString(KEY_PET, name).apply()
     }
 
+    private fun savedNote(): String = prefs().getString(KEY_NOTE, "")?.trim() ?: ""
+
     /** Longest common subsequence length (preserves character order). */
     private fun lcsLength(a: String, b: String): Int {
         val n = a.length
@@ -216,6 +225,21 @@ class ScreenTimerService : Service() {
             setTextColor(Color.WHITE)
             textSize = 26f
             gravity = Gravity.CENTER
+        }
+
+        // The note you left yourself, revealed only once the pet name is typed.
+        // It is the reward for stopping, not decoration on the way past: a note
+        // readable at a glance would be read past at a glance.
+        val noteText = savedNote()
+        val noteView = TextView(this).apply {
+            text = noteText
+            setTextColor(Color.parseColor("#D9B783"))
+            setBackgroundColor(Color.parseColor("#161616"))
+            textSize = 17f
+            gravity = Gravity.CENTER
+            setPadding(dp(18), dp(16), dp(18), dp(16))
+            setLineSpacing(dp(3).toFloat(), 1f)
+            visibility = View.GONE
         }
 
         val firstTime = savedPetName().isEmpty()
@@ -318,6 +342,8 @@ class ScreenTimerService : Service() {
                 c.isEnabled = unlocked
                 c.alpha = if (unlocked) 1f else 0.35f
             }
+            noteView.visibility =
+                if (unlocked && noteText.isNotEmpty()) View.VISIBLE else View.GONE
             locked.text = when {
                 firstTime -> "Longer breaks unlock once a pet name is set."
                 unlocked -> "Unlocked — or take longer:"
@@ -336,6 +362,13 @@ class ScreenTimerService : Service() {
         refreshLock()
 
         column.addView(title)
+        column.addView(
+            noteView,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).also { it.topMargin = dp(22) }
+        )
         column.addView(prompt)
         column.addView(
             input,

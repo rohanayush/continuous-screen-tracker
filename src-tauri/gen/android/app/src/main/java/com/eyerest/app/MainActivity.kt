@@ -84,6 +84,18 @@ class MainActivity : TauriActivity() {
       rearm()
     }
 
+    /**
+     * The note. The app edits it in the WebView, but the overlay has to show it
+     * long after that WebView is gone, so the service keeps its own copy here.
+     */
+    @JavascriptInterface
+    fun getNote(): String = prefs().getString(ScreenTimerService.KEY_NOTE, "") ?: ""
+
+    @JavascriptInterface
+    fun setNote(text: String) {
+      prefs().edit().putString(ScreenTimerService.KEY_NOTE, text.take(500)).apply()
+    }
+
     /** Why it is currently quiet — a window label, "Snoozed", or "". */
     @JavascriptInterface
     fun quietReason(): String =
