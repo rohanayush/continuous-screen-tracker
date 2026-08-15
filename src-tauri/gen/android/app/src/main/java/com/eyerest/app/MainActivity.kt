@@ -54,7 +54,42 @@ class MainActivity : TauriActivity() {
       val ms = value.toLongOrNull() ?: return
       if (!ScreenTimerService.INTERVAL_CHOICES.contains(ms)) return
       prefs().edit().putLong(ScreenTimerService.KEY_INTERVAL, ms).apply()
+      rearm()
+    }
 
+    /**
+     * Quiet hours, as a JSON array of {label, start, end, on} where start and end
+     * are minutes from local midnight. An end before a start wraps past midnight,
+     * which is how sleep is expressed.
+     */
+    @JavascriptInterface
+    fun getWindows(): String =
+      prefs().getString(Suppression.KEY_WINDOWS, "[]") ?: "[]"
+
+    @JavascriptInterface
+    fun setWindows(json: String) {
+      Suppression.write(prefs(), json)
+      // Re-arm so a window that just started takes the reminder off the table now.
+      rearm()
+    }
+
+    /** Epoch ms the current snooze runs to, or "0". Set from the overlay only. */
+    @JavascriptInterface
+    fun getSnoozeUntil(): String = Suppression.snoozeUntil(prefs()).toString()
+
+    /** Ending a snooze early is allowed — starting one is not. */
+    @JavascriptInterface
+    fun clearSnooze() {
+      Suppression.clearSnooze(prefs())
+      rearm()
+    }
+
+    /** Why it is currently quiet — a window label, "Snoozed", or "". */
+    @JavascriptInterface
+    fun quietReason(): String =
+      Suppression.activeLabel(prefs(), System.currentTimeMillis()) ?: ""
+
+    private fun rearm() {
       val intent = Intent(activity, ScreenTimerService::class.java).apply {
         action = ScreenTimerService.ACTION_INTERVAL_CHANGED
       }

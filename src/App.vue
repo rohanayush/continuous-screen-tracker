@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch, onMounted } from "vue";
+import { computed, ref, watch, onMounted, onUnmounted } from "vue";
 
 // The real tracking / reset / reminder logic runs in the native Android
 // foreground service (ScreenTimerService.kt). This screen is a calm status
@@ -11,7 +11,17 @@ type Bridge = {
   getIntervalMs(): string;
   getChoices(): string;
   setIntervalMs(value: string): void;
+  // Added after the first release, so every one of these is optional: an older
+  // installed APK exposes the three above and nothing else.
+  getWindows?(): string;
+  setWindows?(json: string): void;
+  getSnoozeUntil?(): string;
+  clearSnooze?(): void;
+  quietReason?(): string;
 };
+
+/** A stretch of the day the reminder stays out of, in minutes from midnight. */
+type QuietWindow = { label: string; start: number; end: number; on: boolean };
 const bridge = (): Bridge | undefined =>
   (window as unknown as { EyeRest?: Bridge }).EyeRest;
 
@@ -53,6 +63,111 @@ onMounted(() => {
 });
 
 watch(note, (v) => localStorage.setItem("eyeRestNote", v));
+
+// ---- Quiet hours ---------------------------------------------------------
+//
+// The reminder is worth interrupting almost anything, but not a meeting and not
+// sleep. These are the exceptions, kept as minutes from midnight so a window
+// that runs 22:00 → 07:00 is simply one whose end is smaller than its start.
+
+const windows = ref<QuietWindow[]>([]);
+const snoozeUntil = ref(0);
+const quietReason = ref("");
+
+const PRESETS: Omit<QuietWindow, "on">[] = [
+  { label: "Work", start: 9 * 60, end: 18 * 60 },
+  { label: "Sleep", start: 22 * 60, end: 7 * 60 },
+  { label: "Evening", start: 19 * 60, end: 21 * 60 },
+];
+
+const pad = (n: number) => String(n).padStart(2, "0");
+const toClock = (m: number) => `${pad(Math.floor(m / 60))}:${pad(m % 60)}`;
+
+function fromClock(value: string): number | null {
+  const [h, m] = value.split(":").map(Number);
+  if (!Number.isFinite(h) || !Number.isFinite(m)) return null;
+  return Math.min(23, Math.max(0, h)) * 60 + Math.min(59, Math.max(0, m));
+}
+
+/** "9h", "8h 30m" — and it has to survive wrapping past midnight. */
+function windowLength(w: QuietWindow): string {
+  const mins = (w.end - w.start + 1440) % 1440;
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  return h === 0 ? `${m}m` : m === 0 ? `${h}h` : `${h}h ${m}m`;
+}
+
+const wrapsMidnight = (w: QuietWindow) => w.end < w.start;
+
+function loadWindows() {
+  const raw = bridge()?.getWindows?.() ?? localStorage.getItem("eyeRestWindows") ?? "[]";
+  try {
+    const parsed = JSON.parse(raw);
+    windows.value = Array.isArray(parsed)
+      ? parsed
+          .filter((w) => w && Number.isFinite(w.start) && Number.isFinite(w.end))
+          .map((w) => ({
+            label: String(w.label ?? "Quiet"),
+            start: Number(w.start),
+            end: Number(w.end),
+            on: w.on !== false,
+          }))
+      : [];
+  } catch {
+    windows.value = [];
+  }
+}
+
+function saveWindows() {
+  const json = JSON.stringify(windows.value);
+  const b = bridge();
+  if (b?.setWindows) b.setWindows(json);
+  else localStorage.setItem("eyeRestWindows", json); // preview builds
+}
+
+watch(windows, saveWindows, { deep: true });
+
+function addWindow(preset: Omit<QuietWindow, "on">) {
+  windows.value.push({ ...preset, on: true });
+}
+
+function removeWindow(i: number) {
+  windows.value.splice(i, 1);
+}
+
+function setEdge(w: QuietWindow, edge: "start" | "end", value: string) {
+  const m = fromClock(value);
+  if (m != null) w[edge] = m;
+}
+
+/** A zero-length window would never match, so it is never a valid saved state. */
+const invalid = computed(() => windows.value.some((w) => w.start === w.end));
+
+const snoozeLabel = computed(() => {
+  if (snoozeUntil.value <= Date.now()) return "";
+  const d = new Date(snoozeUntil.value);
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+});
+
+function refreshQuiet() {
+  const b = bridge();
+  snoozeUntil.value = Number(b?.getSnoozeUntil?.() ?? 0) || 0;
+  quietReason.value = b?.quietReason?.() ?? "";
+}
+
+function endSnooze() {
+  bridge()?.clearSnooze?.();
+  refreshQuiet();
+}
+
+let quietTimer: number | undefined;
+onMounted(() => {
+  loadWindows();
+  refreshQuiet();
+  // Cheap, and the only way the screen notices a window starting while it is open.
+  quietTimer = window.setInterval(refreshQuiet, 30_000);
+});
+onUnmounted(() => window.clearInterval(quietTimer));
 </script>
 
 <template>
@@ -98,6 +213,93 @@ watch(note, (v) => localStorage.setItem("eyeRestNote", v));
           </button>
         </div>
       </fieldset>
+    </section>
+
+    <!-- ===== Quiet hours ===== -->
+    <section class="quiet-card">
+      <div class="quiet-head">
+        <h2>Quiet hours</h2>
+        <p class="quiet-sub">Times the reminder stays away entirely.</p>
+      </div>
+
+      <p v-if="quietReason" class="quiet-now">
+        <i class="pip pip-warm"></i>
+        Quiet right now — {{ quietReason }}
+        <button v-if="snoozeLabel" type="button" class="undo" @click="endSnooze">
+          Resume now (snoozed to {{ snoozeLabel }})
+        </button>
+      </p>
+
+      <ul v-if="windows.length" class="windows">
+        <li v-for="(w, i) in windows" :key="i" class="window" :class="{ off: !w.on }">
+          <input
+            v-model="w.label"
+            class="w-label"
+            maxlength="20"
+            aria-label="Name for this quiet period"
+          />
+
+          <div class="w-times">
+            <input
+              type="time"
+              class="w-time"
+              :value="toClock(w.start)"
+              aria-label="Start"
+              @change="setEdge(w, 'start', ($event.target as HTMLInputElement).value)"
+            />
+            <span class="w-arrow">→</span>
+            <input
+              type="time"
+              class="w-time"
+              :value="toClock(w.end)"
+              aria-label="End"
+              @change="setEdge(w, 'end', ($event.target as HTMLInputElement).value)"
+            />
+          </div>
+
+          <p class="w-meta">
+            <span v-if="w.start === w.end" class="w-bad">Start and end are the same — this never applies.</span>
+            <template v-else>
+              {{ windowLength(w) }}<span v-if="wrapsMidnight(w)"> · crosses midnight</span>
+            </template>
+          </p>
+
+          <div class="w-io">
+            <button
+              type="button"
+              class="w-toggle"
+              :class="{ on: w.on }"
+              :aria-pressed="w.on"
+              @click="w.on = !w.on"
+            >
+              {{ w.on ? "On" : "Off" }}
+            </button>
+            <button type="button" class="w-remove" aria-label="Remove" @click="removeWindow(i)">
+              Remove
+            </button>
+          </div>
+        </li>
+      </ul>
+
+      <p v-else class="quiet-empty">
+        Nothing set — the reminder can interrupt at any hour.
+      </p>
+
+      <div class="add-row">
+        <button
+          v-for="p in PRESETS"
+          :key="p.label"
+          type="button"
+          class="add"
+          @click="addWindow(p)"
+        >
+          + {{ p.label }} {{ toClock(p.start) }}–{{ toClock(p.end) }}
+        </button>
+      </div>
+
+      <p v-if="invalid" class="quiet-warn">
+        A window whose start equals its end is ignored — give it a real length.
+      </p>
     </section>
 
     <!-- ===== Note ===== -->
@@ -398,6 +600,204 @@ h1 {
 }
 
 /* ---- Note ---- */
+/* ---- Quiet hours --------------------------------------------------------
+   The one screen where the app is configured to *not* act, so it stays as calm
+   as everything else: no red, no warning iconography, and the only colour is
+   the warm tone already used for "something is on". */
+.quiet-card {
+  width: 100%;
+  text-align: left;
+  margin-bottom: 1.6rem;
+  background: var(--bg-soft);
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  padding: 1.1rem 1.05rem 1rem;
+}
+.quiet-head h2 {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--ink);
+}
+.quiet-sub {
+  margin: 0.2rem 0 0.9rem;
+  font-size: 0.82rem;
+  color: var(--ink-dim);
+}
+
+.quiet-now {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0 0 0.9rem;
+  padding: 0.6rem 0.75rem;
+  border-radius: 12px;
+  background: rgba(217, 183, 131, 0.1);
+  border: 1px solid rgba(217, 183, 131, 0.22);
+  font-size: 0.85rem;
+  color: var(--warm);
+}
+.pip-warm {
+  background: var(--warm);
+}
+.undo {
+  margin-left: auto;
+  background: none;
+  border: none;
+  padding: 0.2rem 0;
+  color: var(--accent);
+  font: inherit;
+  font-size: 0.8rem;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.windows {
+  list-style: none;
+  margin: 0 0 0.9rem;
+  padding: 0;
+  display: grid;
+  gap: 0.6rem;
+}
+.window {
+  display: grid;
+  gap: 0.5rem;
+  padding: 0.8rem 0.85rem;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.025);
+  border: 1px solid var(--line);
+  transition: opacity 200ms ease;
+}
+.window.off {
+  opacity: 0.5;
+}
+
+.w-label {
+  background: none;
+  border: none;
+  border-bottom: 1px dashed var(--line);
+  padding: 0 0 0.25rem;
+  color: var(--ink);
+  font: inherit;
+  font-size: 0.92rem;
+  font-weight: 600;
+  width: 100%;
+}
+.w-label:focus {
+  outline: none;
+  border-bottom-color: var(--accent);
+}
+
+.w-times {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+}
+/* type="time" so Android hands over its own clock dial — this app only ever
+   runs there, and a hand-built picker would be the odd one out. */
+.w-time {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 0.5rem 0.6rem;
+  color: var(--ink);
+  font: inherit;
+  font-size: 0.95rem;
+  font-variant-numeric: tabular-nums;
+  color-scheme: dark;
+}
+.w-time:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.w-arrow {
+  flex: none;
+  color: var(--ink-dim);
+}
+
+.w-meta {
+  margin: 0;
+  font-size: 0.78rem;
+  color: var(--ink-dim);
+  font-variant-numeric: tabular-nums;
+}
+.w-bad {
+  color: var(--warm);
+}
+
+.w-io {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.w-toggle {
+  padding: 0.32rem 0.85rem;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: none;
+  color: var(--ink-dim);
+  font: inherit;
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+.w-toggle.on {
+  background: var(--accent-soft);
+  border-color: transparent;
+  color: var(--accent);
+}
+.w-remove {
+  margin-left: auto;
+  background: none;
+  border: none;
+  padding: 0.3rem 0;
+  color: var(--ink-dim);
+  font: inherit;
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+.w-remove:hover {
+  color: var(--warm);
+}
+
+.quiet-empty {
+  margin: 0 0 0.9rem;
+  font-size: 0.85rem;
+  color: var(--ink-dim);
+}
+
+.add-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
+.add {
+  padding: 0.45rem 0.8rem;
+  border-radius: 999px;
+  border: 1px dashed var(--line);
+  background: none;
+  color: var(--ink-dim);
+  font: inherit;
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  transition: color 160ms ease, border-color 160ms ease;
+}
+.add:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.quiet-warn {
+  margin: 0.7rem 0 0;
+  font-size: 0.78rem;
+  color: var(--warm);
+}
+
 .note-card {
   width: 100%;
   text-align: left;

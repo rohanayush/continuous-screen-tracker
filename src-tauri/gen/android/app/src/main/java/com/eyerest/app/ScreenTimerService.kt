@@ -18,6 +18,8 @@ import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
 import android.provider.Settings
+import android.text.Editable
+import android.text.TextWatcher
 import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
@@ -168,11 +170,30 @@ class ScreenTimerService : Service() {
         return 2.0 * lcsLength(a, b) / (a.length + b.length)
     }
 
+    /** Does what was typed pass as the saved pet name? */
+    private fun matchesPetName(entered: String): Boolean {
+        val saved = savedPetName()
+        if (saved.isEmpty()) return false
+        return similarity(saved.lowercase(), entered.trim().lowercase()) >= MATCH_THRESHOLD
+    }
+
     // ---- full-screen rest overlay ----------------------------------------
 
     private fun showOverlay() {
         if (overlayView != null) return
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(this)) {
+            return
+        }
+
+        // Quiet hours, or a snooze taken from a previous overlay. Come back one
+        // full interval after it lifts rather than the instant it does —
+        // otherwise clocking off at 18:00 is met with a black screen at 18:00,
+        // which is the reminder ambushing you for time it agreed not to count.
+        val now = System.currentTimeMillis()
+        val quietUntil = Suppression.endsAt(prefs(), now)
+        if (quietUntil > now) {
+            handler.removeCallbacks(showReminder)
+            handler.postDelayed(showReminder, (quietUntil - now) + thresholdMs())
             return
         }
 
@@ -243,7 +264,7 @@ class ScreenTimerService : Service() {
                 savePetName(entered)
                 dismiss(input)
             } else {
-                if (similarity(saved.lowercase(), entered.lowercase()) >= MATCH_THRESHOLD) {
+                if (matchesPetName(entered)) {
                     dismiss(input)
                 } else {
                     error.text = "That doesn't match your pet name."
@@ -251,6 +272,68 @@ class ScreenTimerService : Service() {
                 }
             }
         }
+
+        // ---- longer breaks, behind the same gate --------------------------
+        //
+        // Dismissing buys one more interval; these buy half an hour or an hour.
+        // That is worth more, so it costs the same thing dismissing does — the
+        // pet name — and the buttons stay dead until it is typed. Gating on
+        // reading the name rather than on a tap is the whole point: the pause
+        // has to be a decision, not a reflex.
+
+        val locked = TextView(this).apply {
+            setTextColor(Color.parseColor("#888888"))
+            textSize = 13f
+            gravity = Gravity.CENTER
+            setPadding(0, dp(26), 0, dp(10))
+        }
+
+        val snoozeRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+        }
+
+        val chips = mutableListOf<Button>()
+        fun chip(label: String, ms: Long): Button = Button(this).apply {
+            text = label
+            isEnabled = false
+            alpha = 0.35f
+            setOnClickListener {
+                // Re-checked here, not just when the field changed: the button is
+                // the thing being trusted, so it verifies for itself.
+                if (!matchesPetName(input.text.toString())) return@setOnClickListener
+                Suppression.snoozeFor(prefs(), ms)
+                dismiss(input)
+            }
+        }
+
+        val chip30 = chip("30 min", 30 * 60_000L)
+        val chip60 = chip("1 hour", 60 * 60_000L)
+        chips.add(chip30)
+        chips.add(chip60)
+
+        fun refreshLock() {
+            val unlocked = matchesPetName(input.text.toString())
+            for (c in chips) {
+                c.isEnabled = unlocked
+                c.alpha = if (unlocked) 1f else 0.35f
+            }
+            locked.text = when {
+                firstTime -> "Longer breaks unlock once a pet name is set."
+                unlocked -> "Unlocked — or take longer:"
+                else -> "🔒 Type your pet name to unlock a longer break."
+            }
+            locked.setTextColor(
+                if (unlocked) Color.parseColor("#9BE8A8") else Color.parseColor("#888888")
+            )
+        }
+
+        input.addTextChangedListener(object : TextWatcher {
+            override fun afterTextChanged(s: Editable?) = refreshLock()
+            override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+            override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+        })
+        refreshLock()
 
         column.addView(title)
         column.addView(prompt)
@@ -266,6 +349,16 @@ class ScreenTimerService : Service() {
                 LinearLayout.LayoutParams.WRAP_CONTENT
             ).also { it.topMargin = dp(20) }
         )
+        column.addView(locked)
+        snoozeRow.addView(
+            chip30,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).also { it.rightMargin = dp(10) }
+        )
+        snoozeRow.addView(chip60)
+        column.addView(snoozeRow)
 
         root.addView(
             column,
